@@ -16,7 +16,7 @@ jobs:
 
     env:
       REGISTRY: ghcr.io
-      IMAGE_NAME: plausible
+      IMAGE_NAME: umarhadi/plausible
 
     steps:
       - name: Checkout
