@@ -1,5 +1,6 @@
 defmodule Plausible.SiteAdmin do
   use Plausible.Repo
+
   import Ecto.Query
 
   def ordering(_schema) do
@@ -8,17 +9,48 @@ defmodule Plausible.SiteAdmin do
 
   def search_fields(_schema) do
     [
-      :domain,
-      members: [:name, :email]
+      :domain
     ]
   end
 
-  def custom_index_query(_conn, _schema, query) do
+  def custom_index_query(conn, _schema, query) do
+    search =
+      (conn.params["custom_search"] || "")
+      |> String.trim()
+      |> String.replace("%", "\%")
+      |> String.replace("_", "\_")
+
+    search_term = "%#{search}%"
+
+    member_query =
+      from s in Plausible.Site,
+        left_join: gm in assoc(s, :guest_memberships),
+        left_join: tm in assoc(gm, :team_membership),
+        left_join: u in assoc(tm, :user),
+        where: s.id == parent_as(:site).id,
+        where: ilike(u.email, ^search_term) or ilike(u.name, ^search_term),
+        select: 1
+
     from(r in query,
-      inner_join: o in assoc(r, :owner),
-      inner_join: m in assoc(r, :memberships),
-      preload: [owner: o, memberships: {m, :user}]
+      as: :site,
+      inner_join: o in assoc(r, :owners),
+      inner_join: t in assoc(r, :team),
+      preload: [owners: o, team: t, guest_memberships: [team_membership: :user]],
+      or_where: type(t.identifier, :string) == ^search,
+      or_where: ilike(t.name, ^search_term),
+      or_where: ilike(r.domain, ^search_term),
+      or_where: ilike(o.email, ^search_term),
+      or_where: ilike(o.name, ^search_term),
+      or_where: exists(member_query)
     )
+  end
+
+  def before_update(_conn, changeset) do
+    if Ecto.Changeset.get_change(changeset, :native_stats_start_at) do
+      {:ok, Ecto.Changeset.put_change(changeset, :stats_start_date, nil)}
+    else
+      {:ok, changeset}
+    end
   end
 
   def form_fields(_) do
@@ -26,7 +58,12 @@ defmodule Plausible.SiteAdmin do
       domain: %{update: :readonly},
       timezone: %{choices: Plausible.Timezones.options()},
       public: nil,
-      stats_start_date: nil,
+      native_stats_start_at: %{
+        type: :string,
+        label: "Native stats start time",
+        help_text:
+          "Cutoff time for native stats in UTC timezone. Expected format: YYYY-MM-DDTHH:mm:ss"
+      },
       ingest_rate_limit_scale_seconds: %{
         help_text: "Time scale for which events rate-limiting is calculated. Default: 60"
       },
@@ -43,7 +80,8 @@ defmodule Plausible.SiteAdmin do
       inserted_at: %{name: "Created at", value: &format_date(&1.inserted_at)},
       timezone: nil,
       public: nil,
-      owner: %{value: &get_owner/1},
+      team: %{value: &get_team/1},
+      owners: %{value: &get_owners/1},
       other_members: %{value: &get_other_members/1},
       limits: %{
         value: fn site ->
@@ -54,15 +92,13 @@ defmodule Plausible.SiteAdmin do
               n -> "⏱ #{n}/#{site.ingest_rate_limit_scale_seconds}s (per server)"
             end
 
-          owner = site.owner
-
-          owner_limits =
-            if owner.accept_traffic_until &&
-                 Date.after?(Date.utc_today(), owner.accept_traffic_until) do
+          team_limits =
+            if site.team.accept_traffic_until &&
+                 Date.after?(Date.utc_today(), site.team.accept_traffic_until) do
               "💸 Rejecting traffic"
             end
 
-          {:safe, Enum.join([rate_limiting_status, owner_limits], "<br/><br/>")}
+          {:safe, Enum.join([rate_limiting_status, team_limits], "<br/><br/>")}
         end
       }
     ]
@@ -80,7 +116,8 @@ defmodule Plausible.SiteAdmin do
       transfer_ownership_direct: %{
         name: "Transfer ownership without invite",
         inputs: [
-          %{name: "email", title: "New Owner Email", default: nil}
+          %{name: "email", title: "New Owner Email", default: nil},
+          %{name: "team_id", title: "Team Identifier", default: nil}
         ],
         action: fn conn, sites, params -> transfer_ownership_direct(conn, sites, params) end
       }
@@ -92,28 +129,24 @@ defmodule Plausible.SiteAdmin do
   end
 
   defp transfer_ownership(conn, sites, %{"email" => email}) do
-    new_owner = Plausible.Auth.find_user_by(email: email)
-    inviter = conn.assigns[:current_user]
+    inviter = conn.assigns.current_user
 
-    if new_owner do
-      result =
-        Plausible.Site.Memberships.bulk_create_invitation(
-          sites,
-          inviter,
-          new_owner.email,
-          :owner,
-          check_permissions: false
-        )
-
-      case result do
-        {:ok, _} ->
-          :ok
-
-        {:error, :transfer_to_self} ->
-          {:error, "User is already an owner of one of the sites"}
-      end
+    with {:ok, new_owner} <- Plausible.Auth.get_user_by(email: email),
+         {:ok, _} <-
+           Plausible.Site.Memberships.bulk_create_invitation(
+             sites,
+             inviter,
+             new_owner.email,
+             :owner,
+             check_permissions: false
+           ) do
+      :ok
     else
-      {:error, "User could not be found"}
+      {:error, :user_not_found} ->
+        {:error, "User could not be found"}
+
+      {:error, :transfer_to_self} ->
+        {:error, "User is already an owner of one of the sites"}
     end
   end
 
@@ -121,49 +154,107 @@ defmodule Plausible.SiteAdmin do
     {:error, "Please select at least one site from the list"}
   end
 
-  defp transfer_ownership_direct(_conn, sites, %{"email" => email}) do
-    new_owner = Plausible.Auth.find_user_by(email: email)
-
-    if new_owner do
-      case Plausible.Site.Memberships.bulk_transfer_ownership_direct(sites, new_owner) do
-        {:ok, _} ->
-          :ok
-
-        {:error, :transfer_to_self} ->
-          {:error, "User is already an owner of one of the sites"}
-
-        {:error, :no_plan} ->
-          {:error, "The new owner does not have a subscription"}
-
-        {:error, {:over_plan_limits, limits}} ->
-          {:error, "Plan limits exceeded for one of the sites: #{Enum.join(limits, ", ")}"}
-      end
+  defp transfer_ownership_direct(_conn, sites, %{"email" => email} = params) do
+    with {:ok, new_owner} <- Plausible.Auth.get_user_by(email: email),
+         {:ok, team} <- get_team_by_id(params["team_id"]),
+         {:ok, _} <-
+           Plausible.Site.Memberships.bulk_transfer_ownership_direct(
+             sites,
+             new_owner,
+             team
+           ) do
+      :ok
     else
-      {:error, "User could not be found"}
+      {:error, :user_not_found} ->
+        {:error, "User could not be found"}
+
+      {:error, :transfer_to_self} ->
+        {:error, "User is already an owner of one of the sites"}
+
+      {:error, :no_plan} ->
+        {:error, "The new owner does not have a subscription"}
+
+      {:error, :multiple_teams} ->
+        {:error, "The new owner owns more than one team"}
+
+      {:error, :permission_denied} ->
+        {:error, "The new owner can't add sites in the selected team"}
+
+      {:error, :invalid_team_id} ->
+        {:error, "The provided team identifier is invalid"}
+
+      {:error, {:over_plan_limits, limits}} ->
+        {:error, "Plan limits exceeded for one of the sites: #{Enum.join(limits, ", ")}"}
     end
+  end
+
+  defp get_team_by_id(id) when is_binary(id) and byte_size(id) > 0 do
+    case Ecto.UUID.cast(id) do
+      {:ok, team_id} ->
+        {:ok, Plausible.Teams.get(team_id)}
+
+      :error ->
+        {:error, :invalid_team_id}
+    end
+  end
+
+  defp get_team_by_id(_) do
+    {:ok, nil}
   end
 
   defp format_date(date) do
-    Timex.format!(date, "{Mshort} {D}, {YYYY}")
+    Calendar.strftime(date, "%b %-d, %Y")
   end
 
-  defp get_owner(site) do
-    owner = site.owner
+  defp get_team(site) do
+    team_name =
+      case site.owners do
+        [owner] ->
+          if site.team.name == "My Team" do
+            owner.name
+          else
+            site.team.name
+          end
 
-    if owner do
-      {:safe,
-       """
-        <a href="/crm/auth/user/#{owner.id}">#{owner.name}</a>
-        <br/><br/>
-        #{owner.email}
-       """}
-    end
+        [_ | _] ->
+          site.team.name
+      end
+      |> html_escape()
+
+    """
+    <a href="/crm/teams/team/#{site.team.id}">#{team_name}</a>
+    """
+    |> Phoenix.HTML.raw()
+  end
+
+  defp get_owners(site) do
+    owners_html =
+      Enum.map(site.owners, fn owner ->
+        escaped_name = html_escape(owner.name)
+        escaped_email = html_escape(owner.email)
+
+        """
+         <a href="/crm/auth/user/#{owner.id}">#{escaped_name}</a>
+         <br/>
+         #{escaped_email}
+        """
+      end)
+
+    {:safe, Enum.join(owners_html, "<br/><br/>")}
   end
 
   defp get_other_members(site) do
-    Enum.filter(site.memberships, &(&1.role != :owner))
-    |> Enum.map(fn m -> m.user.email <> "(#{to_string(m.role)})" end)
-    |> Enum.join(", ")
+    site.guest_memberships
+    |> Enum.map_join(", ", fn m ->
+      id = m.team_membership.user.id
+      email = html_escape(m.team_membership.user.email)
+      role = html_escape(m.role)
+
+      """
+      <a href="/auth/user/#{id}">#{email} (#{role})</a>
+      """
+    end)
+    |> Phoenix.HTML.raw()
   end
 
   def get_struct_fields(module) do
@@ -176,4 +267,10 @@ defmodule Plausible.SiteAdmin do
 
   def create_changeset(schema, attrs), do: Plausible.Site.crm_changeset(schema, attrs)
   def update_changeset(schema, attrs), do: Plausible.Site.crm_changeset(schema, attrs)
+
+  def html_escape(string) do
+    string
+    |> Phoenix.HTML.html_escape()
+    |> Phoenix.HTML.safe_to_string()
+  end
 end

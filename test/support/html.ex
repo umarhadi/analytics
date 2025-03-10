@@ -12,10 +12,14 @@ defmodule Plausible.Test.Support.HTML do
     |> Kernel.not()
   end
 
-  def find(html, value) do
+  def find(html, value) when is_binary(html) do
     html
     |> Floki.parse_document!()
     |> Floki.find(value)
+  end
+
+  def find(html, value) do
+    Floki.find(html, value)
   end
 
   def submit_button(html, form) do
@@ -38,6 +42,17 @@ defmodule Plausible.Test.Support.HTML do
     element
     |> Floki.text()
     |> String.trim()
+    |> String.replace(~r/\s+/, " ")
+  end
+
+  def attr_defined?(html, element, attr) do
+    empty? =
+      html
+      |> find(element)
+      |> Floki.attribute(attr)
+      |> Enum.empty?()
+
+    not empty?
   end
 
   def class_of_element(html, element) do

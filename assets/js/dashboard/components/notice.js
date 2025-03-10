@@ -1,16 +1,18 @@
 import React from "react"
 import { sectionTitles } from "../stats/behaviours"
 import * as api from '../api'
+import { useSiteContext } from "../site-context"
 
-export function FeatureSetupNotice({ site, feature, title, info, callToAction, onHideAction }) {
+export function FeatureSetupNotice({ feature, title, info, callToAction, onHideAction }) {
+  const site = useSiteContext()
   const sectionTitle = sectionTitles[feature]
 
   const requestHideSection = () => {
     if (window.confirm(`Are you sure you want to hide ${sectionTitle}? You can make it visible again in your site settings later.`)) {
-      api.put(`/api/${encodeURIComponent(site.domain)}/disable-feature`, { feature: feature })
-        .then(response => {
-          if (response.ok) { onHideAction() }
-        })
+      api.mutation(`/api/${encodeURIComponent(site.domain)}/disable-feature`, { method: 'PUT', body: { feature: feature } })
+        .then(() => onHideAction())
+        .catch((error) => {if (!(error instanceof api.ApiError)) {throw error}})
+      
     }
   }
 

@@ -11,8 +11,6 @@ defmodule Plausible.Workers.AcceptTrafficUntil do
   use Oban.Worker, queue: :check_accept_traffic_until
   import Ecto.Query
 
-  alias Plausible.Auth.User
-  alias Plausible.Site
   alias Plausible.Repo
   alias Plausible.ClickhouseRepo
 
@@ -28,26 +26,25 @@ defmodule Plausible.Workers.AcceptTrafficUntil do
     # send at most one notification per user, per day
     sent_today_query =
       from s in "sent_accept_traffic_until_notifications",
-        where: s.user_id == parent_as(:user).id and s.sent_on == ^today,
+        where: s.user_id == parent_as(:users).id and s.sent_on == ^today,
         select: true
 
     notifications =
       Repo.all(
-        from u in User,
-          as: :user,
-          join: sm in Site.Membership,
-          on: sm.user_id == u.id,
-          where: sm.role == :owner,
-          where: u.accept_traffic_until == ^tomorrow or u.accept_traffic_until == ^next_week,
+        from t in Plausible.Teams.Team,
+          inner_join: u in assoc(t, :owners),
+          as: :users,
+          inner_join: s in assoc(t, :sites),
+          where: t.accept_traffic_until == ^tomorrow or t.accept_traffic_until == ^next_week,
           where: not exists(sent_today_query),
           select: %{
             id: u.id,
             email: u.email,
-            deadline: u.accept_traffic_until,
-            site_ids: fragment("array_agg(?.site_id)", sm),
+            deadline: t.accept_traffic_until,
+            site_ids: fragment("array_agg(?.id)", s),
             name: u.name
           },
-          group_by: u.id
+          group_by: [u.id, t.accept_traffic_until]
       )
 
     for notification <- notifications do

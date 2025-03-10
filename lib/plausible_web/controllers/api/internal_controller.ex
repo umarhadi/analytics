@@ -1,27 +1,15 @@
 defmodule PlausibleWeb.Api.InternalController do
   use PlausibleWeb, :controller
   use Plausible.Repo
-  alias Plausible.Stats.Clickhouse, as: Stats
-  alias Plausible.{Sites, Site, Auth}
+  alias Plausible.{Sites, Auth}
   alias Plausible.Auth.User
-
-  def domain_status(conn, %{"domain" => domain}) do
-    with %User{id: user_id} <- conn.assigns[:current_user],
-         %Site{} = site <- Sites.get_by_domain(domain),
-         true <- Sites.has_admin_access?(user_id, site) || Auth.is_super_admin?(user_id),
-         true <- Stats.has_pageviews?(site) do
-      json(conn, "READY")
-    else
-      _ ->
-        json(conn, "WAITING")
-    end
-  end
 
   def sites(conn, _params) do
     current_user = conn.assigns[:current_user]
+    current_team = conn.assigns[:current_team]
 
     if current_user do
-      sites = sites_for(current_user)
+      sites = sites_for(current_user, current_team)
 
       json(conn, %{data: sites})
     else
@@ -38,11 +26,13 @@ defmodule PlausibleWeb.Api.InternalController do
     "conversions" => Plausible.Billing.Feature.Goals
   }
   def disable_feature(conn, %{"domain" => domain, "feature" => feature}) do
-    with %User{id: user_id} <- conn.assigns[:current_user],
+    with %User{id: user_id} = user <- conn.assigns[:current_user],
          site <- Sites.get_by_domain(domain),
-         true <- Sites.has_admin_access?(user_id, site) || Auth.is_super_admin?(user_id),
+         true <-
+           Plausible.Teams.Memberships.has_admin_access?(site, user) ||
+             Auth.is_super_admin?(user_id),
          {:ok, mod} <- Map.fetch(@features, feature),
-         {:ok, _site} <- mod.toggle(site, override: false) do
+         {:ok, _site} <- mod.toggle(site, user, override: false) do
       json(conn, "ok")
     else
       {:error, :upgrade_required} ->
@@ -65,8 +55,8 @@ defmodule PlausibleWeb.Api.InternalController do
     end
   end
 
-  defp sites_for(user) do
-    pagination = Sites.list(user, %{page_size: 9})
+  defp sites_for(user, team) do
+    pagination = Sites.list(user, %{page_size: 9}, team: team)
     Enum.map(pagination.entries, &%{domain: &1.domain})
   end
 end

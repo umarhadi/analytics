@@ -2,30 +2,13 @@ defmodule Plausible.SentryFilter do
   @moduledoc """
   Sentry callbacks for filtering and grouping events
   """
-  @behaviour Sentry.EventFilter
-
-  def exclude_exception?(%Sentry.CrashError{}, _source), do: true
-  def exclude_exception?(%Phoenix.NotAcceptableError{}, _), do: true
-  def exclude_exception?(%Plug.CSRFProtection.InvalidCSRFTokenError{}, _), do: true
-  def exclude_exception?(%Plug.Static.InvalidPathError{}, _), do: true
-
-  def exclude_exception?(exception, source) do
-    Sentry.DefaultEventFilter.exclude_exception?(exception, source)
-  end
 
   @spec before_send(Sentry.Event.t()) :: Sentry.Event.t()
   def before_send(event)
 
-  def before_send(
-        %{exception: [%{type: "Clickhousex.Error"}], original_exception: %{code: code}} = event
-      )
-      when is_atom(code) do
-    %{event | fingerprint: ["clickhouse", "db_connection", to_string(code)]}
-  end
-
-  def before_send(%{event_source: :logger, message: "Clickhousex.Protocol " <> _} = event) do
-    %{event | fingerprint: ["clickhouse", "db_connection", "protocol_error"]}
-  end
+  def before_send(%{original_exception: %Phoenix.NotAcceptableError{}}), do: false
+  def before_send(%{original_exception: %Plug.CSRFProtection.InvalidCSRFTokenError{}}), do: false
+  def before_send(%{original_exception: %Plug.Static.InvalidPathError{}}), do: false
 
   def before_send(
         %{
@@ -38,6 +21,14 @@ defmodule Plausible.SentryFilter do
 
   def before_send(%{extra: %{request: %Plausible.Ingestion.Request{}}} = event) do
     %{event | fingerprint: ["ingestion_request"]}
+  end
+
+  def before_send(%{source: :logger, message: %{formatted: "Ranch listener" <> rest}} = event) do
+    if String.contains?(rest, "had its request process") do
+      false
+    else
+      event
+    end
   end
 
   def before_send(event) do

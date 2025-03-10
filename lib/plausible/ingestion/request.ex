@@ -41,8 +41,10 @@ defmodule Plausible.Ingestion.Request do
     field :hash_mode, :integer
     field :pathname, :string
     field :props, :map
+    field :scroll_depth, :integer
+    field :engagement_time, :integer
 
-    on_full_build do
+    on_ee do
       field :revenue_source, :map
     end
 
@@ -77,6 +79,8 @@ defmodule Plausible.Ingestion.Request do
         |> put_request_params(request_body)
         |> put_referrer(request_body)
         |> put_props(request_body)
+        |> put_scroll_depth(request_body)
+        |> put_engagement_time(request_body)
         |> put_pathname()
         |> put_query_params()
         |> put_revenue_source(request_body)
@@ -95,7 +99,7 @@ defmodule Plausible.Ingestion.Request do
     end
   end
 
-  on_full_build do
+  on_ee do
     defp put_revenue_source(changeset, request_body) do
       Plausible.Ingestion.Request.Revenue.put_revenue_source(changeset, request_body)
     end
@@ -110,10 +114,12 @@ defmodule Plausible.Ingestion.Request do
   defp parse_body(conn) do
     case conn.body_params do
       %Plug.Conn.Unfetched{} ->
-        {:ok, body, _conn} = Plug.Conn.read_body(conn)
-
-        case Jason.decode(body) do
-          {:ok, params} when is_map(params) -> {:ok, params}
+        with max_length <- conn.assigns[:read_body_limit] || 1_000_000,
+             {:ok, body, _conn} <-
+               Plug.Conn.read_body(conn, length: max_length, read_length: max_length),
+             {:ok, params} when is_map(params) <- Jason.decode(body) do
+          {:ok, params}
+        else
           _ -> {:error, :invalid_json}
         end
 
@@ -194,11 +200,11 @@ defmodule Plausible.Ingestion.Request do
   defp put_hostname(changeset) do
     host =
       case Changeset.get_field(changeset, :uri) do
-        %{host: host} when is_binary(host) and host != "" -> host
+        %{host: host} when is_binary(host) and host != "" -> sanitize_hostname(host)
         _ -> "(none)"
       end
 
-    Changeset.put_change(changeset, :hostname, sanitize_hostname(host))
+    Changeset.put_change(changeset, :hostname, host)
   end
 
   @max_props 30
@@ -242,6 +248,35 @@ defmodule Plausible.Ingestion.Request do
           _, changeset ->
             {:cont, changeset}
         end)
+    end
+  end
+
+  defp put_scroll_depth(changeset, %{} = request_body) do
+    if Changeset.get_field(changeset, :event_name) == "engagement" do
+      scroll_depth =
+        case request_body["sd"] do
+          sd when is_integer(sd) and sd >= 0 and sd <= 100 -> sd
+          sd when is_integer(sd) and sd > 100 -> 100
+          _ -> 255
+        end
+
+      Changeset.put_change(changeset, :scroll_depth, scroll_depth)
+    else
+      changeset
+    end
+  end
+
+  defp put_engagement_time(changeset, %{} = request_body) do
+    if Changeset.get_field(changeset, :event_name) == "engagement" do
+      engagement_time =
+        case request_body["e"] do
+          e when is_integer(e) and e >= 0 -> e
+          _ -> 0
+        end
+
+      Changeset.put_change(changeset, :engagement_time, engagement_time)
+    else
+      changeset
     end
   end
 

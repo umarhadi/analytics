@@ -4,20 +4,29 @@ defmodule Plausible.Stats.Util do
   """
 
   @doc """
-  `__internal_visits` is fetched when querying bounce rate and visit duration, as it
-  is needed to calculate these from imported data. This function removes that metric
-  from all entries in the results list.
+  This function adds the `visitors` metric into the list of
+  given metrics if it's not already there and if it is needed
+  for any of the other metrics to be calculated.
   """
-  def remove_internal_visits_metric(results, metrics) when is_list(results) do
-    if :bounce_rate in metrics or :visit_duration in metrics do
-      results
-      |> Enum.map(&remove_internal_visits_metric/1)
+  def maybe_add_visitors_metric(metrics) do
+    needed? =
+      Enum.any?(
+        [:percentage, :conversion_rate, :group_conversion_rate, :time_on_page],
+        &(&1 in metrics)
+      )
+
+    if needed? and :visitors not in metrics do
+      metrics ++ [:visitors]
     else
-      results
+      metrics
     end
   end
 
-  def remove_internal_visits_metric(result) when is_map(result) do
-    Map.delete(result, :__internal_visits)
+  def shortname(_query, metric) when is_atom(metric), do: metric
+  def shortname(_query, "time:" <> _), do: :time
+
+  def shortname(query, dimension) do
+    index = Enum.find_index(query.dimensions, &(&1 == dimension))
+    :"dim#{index}"
   end
 end

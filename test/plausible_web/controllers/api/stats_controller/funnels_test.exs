@@ -1,11 +1,12 @@
 defmodule PlausibleWeb.Api.StatsController.FunnelsTest do
   use PlausibleWeb.ConnCase, async: true
   use Plausible
-  @moduletag :full_build_only
+  use Plausible.Teams.Test
+  @moduletag :ee_only
 
-  on_full_build do
-    @user_id 123
-    @other_user_id 456
+  on_ee do
+    @user_id Enum.random(1000..9999)
+    @other_user_id @user_id + 1
 
     @build_funnel_with [
       {"page_path", "/blog/announcement"},
@@ -15,7 +16,7 @@ defmodule PlausibleWeb.Api.StatsController.FunnelsTest do
     ]
 
     describe "GET /api/stats/funnel - default" do
-      setup [:create_user, :log_in, :create_new_site]
+      setup [:create_user, :log_in, :create_site]
 
       test "computes funnel for a day", %{conn: conn, site: site} do
         {:ok, funnel} = setup_funnel(site, @build_funnel_with)
@@ -98,7 +99,7 @@ defmodule PlausibleWeb.Api.StatsController.FunnelsTest do
       end
 
       test "computes all-time funnel with filters", %{conn: conn, user: user} do
-        site = insert(:site, stats_start_date: ~D[2020-01-01], members: [user])
+        site = new_site(stats_start_date: ~D[2020-01-01], owner: user)
         {:ok, funnel} = setup_funnel(site, @build_funnel_with)
 
         populate_stats(site, [
@@ -106,21 +107,21 @@ defmodule PlausibleWeb.Api.StatsController.FunnelsTest do
           build(:pageview,
             pathname: "/blog/announcement",
             user_id: @other_user_id,
-            utm_medium: "social",
-            timestamp: ~N[2021-01-01 12:00:00]
+            timestamp: ~N[2021-01-01 12:00:00],
+            utm_medium: "social"
           ),
           build(:event, name: "Signup", user_id: @user_id),
           build(:event,
             name: "Signup",
             user_id: @other_user_id,
-            utm_medium: "social",
-            timestamp: ~N[2021-01-01 12:01:00]
+            timestamp: ~N[2021-01-01 12:01:00],
+            utm_medium: "social"
           ),
           build(:pageview, pathname: "/cart/add/product", user_id: @user_id),
           build(:event, name: "Purchase", user_id: @user_id)
         ])
 
-        filters = Jason.encode!(%{utm_medium: "social"})
+        filters = Jason.encode!([[:is, "visit:utm_medium", ["social"]]])
 
         resp =
           conn
@@ -228,8 +229,8 @@ defmodule PlausibleWeb.Api.StatsController.FunnelsTest do
         user: user,
         site: site
       } do
-        insert(:growth_subscription, user: user)
         {:ok, funnel} = setup_funnel(site, @build_funnel_with)
+        subscribe_to_growth_plan(user)
 
         resp =
           conn
@@ -244,12 +245,12 @@ defmodule PlausibleWeb.Api.StatsController.FunnelsTest do
     end
 
     describe "GET /api/stats/funnel - disallowed filters" do
-      setup [:create_user, :log_in, :create_new_site]
+      setup [:create_user, :log_in, :create_site]
 
       test "event:page", %{conn: conn, site: site} do
         {:ok, funnel} = setup_funnel(site, @build_funnel_with)
 
-        filters = Jason.encode!(%{page: "/pageA"})
+        filters = Jason.encode!([[:is, "event:page", ["/pageA"]]])
 
         resp =
           conn
@@ -266,7 +267,8 @@ defmodule PlausibleWeb.Api.StatsController.FunnelsTest do
       test "event:goal", %{conn: conn, site: site} do
         {:ok, funnel} = setup_funnel(site, @build_funnel_with)
 
-        filters = Jason.encode!(%{goal: "Signup", page: "/pageA"})
+        filters =
+          Jason.encode!([[:is, "event:goal", ["Signup"]], [:is, "event:page", ["/pageA"]]])
 
         resp =
           conn
@@ -293,6 +295,120 @@ defmodule PlausibleWeb.Api.StatsController.FunnelsTest do
                    "We are unable to show funnels when the dashboard is filtered by realtime period",
                  "level" => "normal"
                }
+      end
+    end
+
+    describe "GET /api/stats/funnel - page scroll goals" do
+      setup [:create_user, :log_in, :create_site]
+
+      test "computes a funnel with page scroll goals", %{conn: conn, site: site} do
+        goals = [
+          insert(:goal, site: site, event_name: "Onboarding Start"),
+          insert(:goal,
+            site: site,
+            page_path: "/onboard",
+            scroll_threshold: 25,
+            display_name: "Scroll 25% on /onboard"
+          ),
+          insert(:goal,
+            site: site,
+            page_path: "/onboard",
+            scroll_threshold: 50,
+            display_name: "Scroll 50% on /onboard"
+          ),
+          insert(:goal,
+            site: site,
+            page_path: "/onboard",
+            scroll_threshold: 75,
+            display_name: "Scroll 75% on /onboard"
+          ),
+          insert(:goal, site: site, page_path: "/onboard-completed")
+        ]
+
+        {:ok, funnel} =
+          Plausible.Funnels.create(site, "Onboarding", Enum.map(goals, &%{"goal_id" => &1.id}))
+
+        populate_stats(site, [
+          # user 1 - completes the whole funnel
+          build(:event, user_id: 1, name: "Onboarding Start", timestamp: ~N[2021-01-01 00:00:00]),
+          build(:pageview, user_id: 1, pathname: "/onboard", timestamp: ~N[2021-01-01 00:00:10]),
+          build(:engagement,
+            user_id: 1,
+            pathname: "/onboard",
+            scroll_depth: 80,
+            timestamp: ~N[2021-01-01 00:00:20]
+          ),
+          build(:pageview,
+            user_id: 1,
+            pathname: "/onboard-completed",
+            timestamp: ~N[2021-01-01 00:00:30]
+          ),
+          # user 2 - drops off after scrolling 25% on /onboard
+          build(:event, user_id: 2, name: "Onboarding Start", timestamp: ~N[2021-01-01 00:00:00]),
+          build(:pageview, user_id: 2, pathname: "/onboard", timestamp: ~N[2021-01-01 00:00:10]),
+          build(:engagement,
+            user_id: 2,
+            pathname: "/onboard",
+            scroll_depth: 25,
+            timestamp: ~N[2021-01-01 00:00:20]
+          )
+        ])
+
+        resp =
+          conn
+          |> get("/api/stats/#{site.domain}/funnels/#{funnel.id}/?period=day&date=2021-01-01")
+          |> json_response(200)
+
+        assert %{
+                 "all_visitors" => 2,
+                 "entering_visitors" => 2,
+                 "entering_visitors_percentage" => "100",
+                 "name" => "Onboarding",
+                 "never_entering_visitors" => 0,
+                 "never_entering_visitors_percentage" => "0",
+                 "steps" => [
+                   %{
+                     "conversion_rate" => "100",
+                     "conversion_rate_step" => "0",
+                     "dropoff" => 0,
+                     "dropoff_percentage" => "0",
+                     "label" => "Onboarding Start",
+                     "visitors" => 2
+                   },
+                   %{
+                     "conversion_rate" => "100",
+                     "conversion_rate_step" => "100",
+                     "dropoff" => 0,
+                     "dropoff_percentage" => "0",
+                     "label" => "Scroll 25% on /onboard",
+                     "visitors" => 2
+                   },
+                   %{
+                     "conversion_rate" => "50",
+                     "conversion_rate_step" => "50",
+                     "dropoff" => 1,
+                     "dropoff_percentage" => "50",
+                     "label" => "Scroll 50% on /onboard",
+                     "visitors" => 1
+                   },
+                   %{
+                     "conversion_rate" => "50",
+                     "conversion_rate_step" => "100",
+                     "dropoff" => 0,
+                     "dropoff_percentage" => "0",
+                     "label" => "Scroll 75% on /onboard",
+                     "visitors" => 1
+                   },
+                   %{
+                     "conversion_rate" => "50",
+                     "conversion_rate_step" => "100",
+                     "dropoff" => 0,
+                     "dropoff_percentage" => "0",
+                     "label" => "Visit /onboard-completed",
+                     "visitors" => 1
+                   }
+                 ]
+               } = resp
       end
     end
 

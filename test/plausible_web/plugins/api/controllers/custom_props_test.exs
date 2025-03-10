@@ -1,5 +1,6 @@
 defmodule PlausibleWeb.Plugins.API.Controllers.CustomPropsTest do
   use PlausibleWeb.PluginsAPICase, async: true
+  use Plausible.Teams.Test
   alias PlausibleWeb.Plugins.API.Schemas
 
   describe "examples" do
@@ -35,14 +36,14 @@ defmodule PlausibleWeb.Plugins.API.Controllers.CustomPropsTest do
   end
 
   describe "business tier" do
-    @describetag :full_build_only
+    @describetag :ee_only
     test "fails on custom prop enable attempt with insufficient plan", %{
       site: site,
       token: token,
       conn: conn
     } do
-      site = Plausible.Repo.preload(site, :owner)
-      insert(:growth_subscription, user: site.owner)
+      [owner | _] = Plausible.Repo.preload(site, :owners).owners
+      subscribe_to_growth_plan(owner)
 
       url = Routes.plugins_api_custom_props_url(PlausibleWeb.Endpoint, :enable)
 
@@ -65,8 +66,8 @@ defmodule PlausibleWeb.Plugins.API.Controllers.CustomPropsTest do
       token: token,
       conn: conn
     } do
-      site = Plausible.Repo.preload(site, :owner)
-      insert(:growth_subscription, user: site.owner)
+      [owner | _] = Plausible.Repo.preload(site, :owners).owners
+      subscribe_to_growth_plan(owner)
 
       url = Routes.plugins_api_custom_props_url(PlausibleWeb.Endpoint, :enable)
 

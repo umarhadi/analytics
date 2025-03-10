@@ -1,56 +1,34 @@
-import numberFormatter, {durationFormatter} from '../../util/number-formatter'
-
-export const METRIC_MAPPING = {
-  'Unique visitors (last 30 min)': 'visitors',
-  'Pageviews (last 30 min)': 'pageviews',
-  'Unique visitors': 'visitors',
-  'Visit duration': 'visit_duration',
-  'Total pageviews': 'pageviews',
-  'Views per visit': 'views_per_visit',
-  'Total visits': 'visits',
-  'Bounce rate': 'bounce_rate',
-  'Unique conversions': 'conversions',
-  'Average revenue': 'average_revenue',
-  'Total revenue': 'total_revenue',
-}
-
 export const METRIC_LABELS = {
   'visitors': 'Visitors',
   'pageviews': 'Pageviews',
+  'events': 'Total Conversions',
   'views_per_visit': 'Views per Visit',
   'visits': 'Visits',
   'bounce_rate': 'Bounce Rate',
   'visit_duration': 'Visit Duration',
   'conversions': 'Converted Visitors',
+  'conversion_rate': 'Conversion Rate',
   'average_revenue': 'Average Revenue',
   'total_revenue': 'Total Revenue',
+  'scroll_depth': 'Scroll Depth',
 }
 
-export const METRIC_FORMATTER = {
-  'visitors': numberFormatter,
-  'pageviews': numberFormatter,
-  'visits': numberFormatter,
-  'views_per_visit': (number) => (number),
-  'bounce_rate': (number) => (`${number}%`),
-  'visit_duration': durationFormatter,
-  'conversions': numberFormatter,
-  'total_revenue': numberFormatter,
-  'average_revenue': numberFormatter,
-}
+function plottable(dataArray) {
+  return dataArray?.map((value) => {
+    if (typeof value === 'object' && value !== null) {
+      // Revenue metrics are returned as objects with a `value` property
+      return value.value
+    }
 
-export const LoadingState = {
-  loading: 'loading',
-  refreshing: 'refreshing',
-  loaded: 'loaded',
-  isLoadingOrRefreshing: function (state) { return [this.loading, this.refreshing].includes(state) },
-  isLoadedOrRefreshing: function (state) { return [this.loaded, this.refreshing].includes(state) }
+    return value || 0
+  })
 }
 
 const buildComparisonDataset = function(comparisonPlot) {
   if (!comparisonPlot) return []
 
   return [{
-    data: comparisonPlot,
+    data: plottable(comparisonPlot),
     borderColor: 'rgba(60,70,110,0.2)',
     pointBackgroundColor: 'rgba(60,70,110,0.2)',
     pointHoverBackgroundColor: 'rgba(60, 70, 110)',
@@ -65,7 +43,7 @@ const buildDashedDataset = function(plot, presentIndex) {
   const dashedPlot = (new Array(presentIndex - 1)).concat(dashedPart)
 
   return [{
-    data: dashedPlot,
+    data: plottable(dashedPlot),
     borderDash: [3, 3],
     borderColor: 'rgba(101,116,205)',
     pointHoverBackgroundColor: 'rgba(71, 87, 193)',
@@ -77,7 +55,7 @@ const buildMainPlotDataset = function(plot, presentIndex) {
   const data = presentIndex ? plot.slice(0, presentIndex) : plot
 
   return [{
-    data: data,
+    data: plottable(data),
     borderColor: 'rgba(101,116,205)',
     pointBackgroundColor: 'rgba(101,116,205)',
     pointHoverBackgroundColor: 'rgba(71, 87, 193)',
